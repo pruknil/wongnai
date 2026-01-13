@@ -53,8 +53,8 @@ func (ws *WongnaiScraper) GetRestaurantStatus(restaurantID string) (*model.Resta
 
 		// Pattern สำหรับหาสถานะเปิด/ปิด
 		openPattern := regexp.MustCompile(`เปิดอยู่(?:จนถึง\s*(\d{1,2}:\d{2}))?`)
-		closingSoonPattern := regexp.MustCompile(`กำลังจะปิด`)
-		closedPattern := regexp.MustCompile(`ปิดอยู่`)
+		closingSoonPattern := regexp.MustCompile(`฿฿กำลังจะปิด`)
+		closedPattern := regexp.MustCompile(`฿฿ปิดอยู่`)
 
 		if matches := openPattern.FindStringSubmatch(bodyText); len(matches) > 1 && matches[1] != "" {
 			status.IsOpen = true
