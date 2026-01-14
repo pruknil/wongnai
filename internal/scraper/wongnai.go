@@ -1,10 +1,11 @@
 package scraper
 
 import (
-	"checkopen/internal/model"
-	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
+
+	"checkopen/internal/model"
 
 	"github.com/gocolly/colly/v2"
 )
@@ -29,7 +30,7 @@ func NewWongnaiScraper() *WongnaiScraper {
 
 // GetRestaurantStatus scrapes restaurant status from Wongnai
 func (ws *WongnaiScraper) GetRestaurantStatus(restaurantID string) (*model.RestaurantStatus, error) {
-	url := fmt.Sprintf("https://www.wongnai.com/restaurants/%s", restaurantID)
+	url := fmt.Sprintf("https://www.wongnai.com/delivery/businesses/%s/order", restaurantID)
 
 	status := &model.RestaurantStatus{
 		RestaurantID: restaurantID,
@@ -38,65 +39,38 @@ func (ws *WongnaiScraper) GetRestaurantStatus(restaurantID string) (*model.Resta
 	}
 
 	var foundStatus bool
-	var responseBody string
-
-	// Capture response body
-	ws.collector.OnResponse(func(r *colly.Response) {
-		responseBody = string(r.Body)
-	})
 
 	ws.collector.OnHTML("body", func(e *colly.HTMLElement) {
-		// Extract window._wn JSON from the response
-		// Look for the pattern: window._wn = {...}
-		jsonPattern := regexp.MustCompile(`window\._wn\s*=\s*({.+?});`)
-		matches := jsonPattern.FindStringSubmatch(responseBody)
-
-		if len(matches) > 1 {
-			jsonStr := matches[0]
-
-			// Parse the JSON
-			var data map[string]interface{}
-			if err := json.Unmarshal([]byte(jsonStr[13:len(jsonStr)-1]), &data); err != nil {
-				fmt.Printf("Error parsing JSON: %v\n", err)
-				return
+		// ค้นหาชื่อร้าน
+		e.ForEach("h1", func(_ int, el *colly.HTMLElement) {
+			if status.Name == "" {
+				status.Name = strings.TrimSpace(el.Text)
 			}
+		})
 
-			// Extract restaurant info from the store.business object
-			if store, ok := data["store"].(map[string]interface{}); ok {
-				if business, ok := store["business"].(map[string]interface{}); ok {
+		// ค้นหาคำว่า "เปิดอยู่" ในเนื้อหาทั้งหมด
+		bodyText := e.Text
 
-					if vv, ok := business["value"].(map[string]interface{}); ok {
-						// Get restaurant name
-						if name, ok := vv["name"].(string); ok {
-							status.Name = name
-						}
-						// Get working hours status
-						if whStatus, ok := vv["workingHoursStatus"].(map[string]interface{}); ok {
-							if isOpen, ok := whStatus["open"].(bool); ok {
-								status.IsOpen = isOpen
-							}
+		// Pattern สำหรับหาสถานะเปิด/ปิด
+		openPattern := regexp.MustCompile(`เปิดอยู่(?:จนถึง\s*(\d{1,2}:\d{2}))?`)
+		closedPattern := regexp.MustCompile(`ปิดอยู่`)
 
-							if status.IsOpen {
-								status.Status = "เปิดอยู่"
-							} else {
-								status.Status = "ปิดแล้ว"
-							}
+		if matches := openPattern.FindStringSubmatch(bodyText); len(matches) > 1 && matches[1] != "" {
+			status.IsOpen = true
+			status.Status = "เปิดอยู่"
+			foundStatus = true
 
-							if msg, ok := whStatus["message"].(string); ok {
-								status.Message = msg
-								foundStatus = true
-								status.OpenUntil = msg
-							}
-
-							if closing, ok := whStatus["closingSoon"].(bool); ok && closing {
-								status.Status = "กำลังจะปิด"
-								foundStatus = true
-							}
-						}
-					}
-
-				}
-			}
+			//if len(matches) > 1 && matches[1] != "" {
+			status.OpenUntil = matches[1]
+			status.Message = fmt.Sprintf("ร้านเปิดอยู่จนถึง %s น.", matches[1])
+			//} else {
+			//	status.Message = "ร้านเปิดอยู่"
+			//}
+		} else if closedPattern.MatchString(bodyText) {
+			status.IsOpen = false
+			status.Status = "ปิด"
+			status.Message = "ร้านปิดอยู่"
+			foundStatus = true
 		}
 	})
 
