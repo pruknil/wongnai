@@ -30,7 +30,7 @@ func NewWongnaiScraper() *WongnaiScraper {
 	)
 
 	// Set rate limiting: 2 seconds delay between requests
-	c.Limit(&colly.LimitRule{
+	_ = c.Limit(&colly.LimitRule{
 		Parallelism: 1,
 		Delay:       2 * time.Second,
 		RandomDelay: 1 * time.Second,
@@ -71,22 +71,44 @@ func (ws *WongnaiScraper) GetRestaurantStatus(restaurantID string) (*model.Resta
 	}
 
 	var lastErr error
-	var foundStatus bool
 
 	// Retry logic with exponential backoff
 	for attempt := 0; attempt <= ws.maxRetries; attempt++ {
 		if attempt > 0 {
-			// Calculate exponential backoff: 2^attempt seconds with some jitter
+			// Calculate exponential backoff: 2^attempt seconds
 			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
 			fmt.Printf("Retry attempt %d/%d after %v...\n", attempt, ws.maxRetries, backoff)
 			time.Sleep(backoff)
 		}
 
-		foundStatus = false
-		lastErr = nil
+		// Create a fresh collector for this attempt to avoid state issues
+		collector := colly.NewCollector(
+			colly.AllowedDomains("www.wongnai.com"),
+			colly.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+			colly.AllowURLRevisit(),
+		)
+
+		_ = collector.Limit(&colly.LimitRule{
+			Parallelism: 1,
+			Delay:       2 * time.Second,
+			RandomDelay: 1 * time.Second,
+		})
+
+		collector.SetRequestTimeout(15 * time.Second)
+
+		collector.OnRequest(func(r *colly.Request) {
+			r.Headers.Set("Accept-Language", "th-TH,th;q=0.9,en;q=0.8")
+			r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+			r.Headers.Set("Accept-Encoding", "gzip, deflate")
+			r.Headers.Set("Connection", "keep-alive")
+			r.Headers.Set("Upgrade-Insecure-Requests", "1")
+			r.Headers.Set("Referer", "https://www.wongnai.com/")
+		})
+
+		foundStatus := false
 
 		// Set up the OnHTML handler
-		ws.collector.OnHTML("body", func(e *colly.HTMLElement) {
+		collector.OnHTML("body", func(e *colly.HTMLElement) {
 			// ค้นหาชื่อร้าน
 			e.ForEach("h1", func(_ int, el *colly.HTMLElement) {
 				if status.Name == "" {
@@ -115,45 +137,43 @@ func (ws *WongnaiScraper) GetRestaurantStatus(restaurantID string) (*model.Resta
 			}
 		})
 
-		// Set up the OnError handler
-		ws.collector.OnError(func(r *colly.Response, err error) {
+		// Set up the OnError handler with nil check
+		collector.OnError(func(_ *colly.Response, err error) {
 			lastErr = err
-			fmt.Printf("Error scraping (attempt %d): %v (status code: %d)\n", attempt+1, err, r.StatusCode)
+			fmt.Printf("Error scraping (attempt %d): %v\n", attempt+1, err)
 		})
 
 		// Attempt to visit the URL
-		err := ws.collector.Visit(url)
-		if err != nil && lastErr == nil {
+		err := collector.Visit(url)
+		if err != nil {
 			lastErr = err
 		}
 
-		// If successful, return
-		if foundStatus || err == nil {
-			break
+		// If status found, we're done
+		if foundStatus {
+			return status, nil
 		}
 
-		// Check if it's a rate limiting error
-		if lastErr != nil && strings.Contains(lastErr.Error(), "429") {
-			// For 429 Too Many Requests, increase backoff
-			fmt.Printf("Rate limited, increasing backoff...\n")
-			continue
-		}
-
-		// If we got an actual response, don't retry
+		// If no error but status not found, still mark success for logging
 		if err == nil && !foundStatus {
+			fmt.Printf("Response received but status not found (attempt %d)\n", attempt+1)
+			// Don't retry if we got a valid response without finding status
 			break
+		}
+
+		// Check if it's a rate limiting error - retry
+		if lastErr != nil && strings.Contains(lastErr.Error(), "429") {
+			fmt.Printf("Rate limited (429), will retry...\n")
+			continue
 		}
 	}
 
-	// Clear handlers to prevent memory issues
-	ws.collector.OnHTML("body", nil)
-	ws.collector.OnError(nil)
-
-	if lastErr != nil && !foundStatus {
+	// Return final status or error
+	if lastErr != nil {
 		return nil, fmt.Errorf("failed to scrape after %d attempts: %w", ws.maxRetries+1, lastErr)
 	}
 
-	if !foundStatus {
+	if status.Message == "" {
 		status.Message = "ไม่พบข้อมูลสถานะการเปิด/ปิด"
 	}
 
